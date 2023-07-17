@@ -1,5 +1,6 @@
 package treecount;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.inject.Provides;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -7,6 +8,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import javax.inject.Inject;
@@ -56,8 +59,8 @@ public class TreeCountPlugin extends Plugin
 	private TreeCountOverlay overlay;
 
 	@Getter
-	private final Map<GameObject, Integer> treeMap = new HashMap<>();
-	private final Map<Player, GameObject> playerMap = new HashMap<>();
+	private final Map<GameObject, Integer> treePlayerCountMap = new HashMap<>();
+	private final Map<Player, GameObject> playerTreeMap = new HashMap<>();
 	@Getter
 	private final Map<GameObject, List<WorldPoint>> treeTileMap = new HashMap<>();
 	private final Map<WorldPoint, GameObject> tileTreeMap = new HashMap<>();
@@ -65,8 +68,6 @@ public class TreeCountPlugin extends Plugin
 	private final Map<Player, Integer> playerOrientationMap = new ConcurrentHashMap<>();
 
 	private int previousPlane;
-
-	private boolean firstRun;
 
 	@Provides
 	TreeCountConfig provideConfig(ConfigManager configManager)
@@ -84,19 +85,18 @@ public class TreeCountPlugin extends Plugin
 	protected void shutDown()
 	{
 		overlayManager.remove(overlay);
-		treeMap.clear();
+		treePlayerCountMap.clear();
 		treeTileMap.clear();
 		tileTreeMap.clear();
-		playerMap.clear();
+		playerTreeMap.clear();
 		playerOrientationMap.clear();
 		previousPlane = -1;
-		firstRun = true;
 	}
 
 	@Subscribe
 	public void onGameTick(GameTick gameTick)
 	{
-		if (isRegionInWoodcuttingGuild(client.getLocalPlayer().getWorldLocation().getRegionID()))
+		if (isPlayerInWoodcuttingGuild(client.getLocalPlayer()))
 		{
 			return;
 		}
@@ -106,50 +106,17 @@ public class TreeCountPlugin extends Plugin
 		if (previousPlane != currentPlane)
 		{
 			// Only clear values because sometimes the trees are still there when changing planes (Top of Seer's Bank)
-			treeMap.replaceAll((k, v) -> 0);
+			treePlayerCountMap.replaceAll((k, v) -> 0);
 			previousPlane = currentPlane;
 		}
 
-		if (firstRun)
-		{
-			// Any missing players just in case, although it's not really required. Doesn't hurt since one time operation
-			client.getPlayers().forEach(player -> {
-				if (!player.equals(client.getLocalPlayer()))
-				{
-					playerMap.putIfAbsent(player, null);
-					playerOrientationMap.put(player, -1);
-				}
-			});
-			for (Player player : playerMap.keySet())
+		playerOrientationMap.forEach((player, previousOrientation) -> {
+			int currentOrientation = player.getOrientation();
+			if (currentOrientation != previousOrientation)
 			{
-				if (isWoodcutting(player) && !treeMap.isEmpty())
-				{
-					addToTreeFocusedMaps(player);
-				}
+				onPlayerOrientationChanged(new PlayerOrientationChanged(player, previousOrientation, currentOrientation));
 			}
-		}
-
-		// Let's create a PlayerOrientationChanged event for cases when the players shift's orientation while chopping
-		if (!playerOrientationMap.isEmpty())
-		{
-			for (Map.Entry<Player, Integer> playerOrientationEntry : playerOrientationMap.entrySet())
-			{
-				Player player = playerOrientationEntry.getKey();
-				int previousOrientation = playerOrientationEntry.getValue();
-				int currentOrientation = player.getOrientation();
-
-				if (currentOrientation != previousOrientation)
-				{
-					final PlayerOrientationChanged playerOrientationChanged = new PlayerOrientationChanged(player, previousOrientation, currentOrientation);
-					onPlayerOrientationChanged(playerOrientationChanged);
-				}
-			}
-		}
-
-		if (firstRun)
-		{
-			firstRun = false;
-		}
+		});
 	}
 
 	@Subscribe
@@ -158,21 +125,20 @@ public class TreeCountPlugin extends Plugin
 		// Event runs first upon login
 		GameObject gameObject = event.getGameObject();
 
-		if (isRegionInWoodcuttingGuild(gameObject.getWorldLocation().getRegionID()))
+		if (isGameObjectInWoodcuttingGuild(gameObject))
 		{
 			return;
 		}
 
-		Tree tree = Tree.findTree(gameObject.getId());
-
-		if (tree != null)
-		{
-			log.debug("Tree {} spawned at {}", tree, gameObject.getLocalLocation());
-			treeMap.put(gameObject, 0);
-			List<WorldPoint> points = getPoints(gameObject);
-			treeTileMap.put(gameObject, points);
-			points.forEach(point -> tileTreeMap.put(point, gameObject));
-		}
+		Tree.findTree(gameObject.getId()).ifPresent(tree ->
+			{
+				log.debug("Tree {} spawned at {}", tree, gameObject.getLocalLocation());
+				treePlayerCountMap.put(gameObject, 0);
+				List<WorldPoint> points = getPoints(gameObject);
+				treeTileMap.put(gameObject, points);
+				points.forEach(point -> tileTreeMap.put(point, gameObject));
+			}
+		);
 	}
 
 	private List<WorldPoint> getPoints(GameObject gameObject)
@@ -201,20 +167,21 @@ public class TreeCountPlugin extends Plugin
 	public void onGameObjectDespawned(final GameObjectDespawned event)
 	{
 		final GameObject gameObject = event.getGameObject();
-		if (isRegionInWoodcuttingGuild(gameObject.getWorldLocation().getRegionID()))
+		if (isGameObjectInWoodcuttingGuild(gameObject))
 		{
 			return;
 		}
-		Tree tree = Tree.findTree(gameObject.getId());
-		if (tree != null && !tree.equals(Tree.REGULAR_TREE))
-		{
-			treeMap.remove(gameObject);
-			List<WorldPoint> points = treeTileMap.remove(gameObject);
-			if (points != null)
+
+		Tree.findTree(gameObject.getId()).ifPresent(tree ->
 			{
-				points.forEach(tileTreeMap::remove);
+				treePlayerCountMap.remove(gameObject);
+				List<WorldPoint> points = treeTileMap.remove(gameObject);
+				if (points != null)
+				{
+					points.forEach(tileTreeMap::remove);
+				}
 			}
-		}
+		);
 	}
 
 	@Subscribe
@@ -222,12 +189,11 @@ public class TreeCountPlugin extends Plugin
 	{
 		if (event.getGameState() == GameState.LOADING)
 		{
-			treeMap.clear();
+			treePlayerCountMap.clear();
 			treeTileMap.clear();
 			tileTreeMap.clear();
-			playerMap.clear();
+			playerTreeMap.clear();
 			playerOrientationMap.clear();
-			firstRun = true;
 		}
 	}
 
@@ -237,27 +203,7 @@ public class TreeCountPlugin extends Plugin
 		// Event runs second upon login
 		Player player = event.getPlayer();
 		log.debug("Player {} spawned at {}", player.getName(), player.getWorldLocation());
-
-		if (player.equals(client.getLocalPlayer()))
-		{
-			return;
-		}
-
-		if (isRegionInWoodcuttingGuild(player.getWorldLocation().getRegionID()))
-		{
-			return;
-		}
-
-		if (firstRun)
-		{
-			playerMap.put(player, null);
-			return;
-		}
-
-		if (isWoodcutting(player))
-		{
-			addToTreeFocusedMaps(player);
-		}
+		onPlayerOrientationChanged(new PlayerOrientationChanged(player, -1, player.getOrientation()));
 	}
 
 	@Subscribe
@@ -270,67 +216,50 @@ public class TreeCountPlugin extends Plugin
 			return;
 		}
 
-		if (isRegionInWoodcuttingGuild(player.getWorldLocation().getRegionID()))
+		if (isPlayerInWoodcuttingGuild(player))
 		{
-			return;
-		}
-
-		if (firstRun)
-		{
-			playerMap.remove(player);
-			playerOrientationMap.remove(player);
 			return;
 		}
 
 		removeFromTreeMaps(player);
+		playerOrientationMap.remove(player);
 	}
 
 	@Subscribe
 	public void onAnimationChanged(final AnimationChanged event)
 	{
-		if (firstRun)
+		if (!(event.getActor() instanceof Player))
 		{
 			return;
 		}
 
-		if (event.getActor() instanceof Player)
+		Player player = (Player) event.getActor();
+
+		if (Objects.equals(player, client.getLocalPlayer()))
 		{
-			Player player = (Player) event.getActor();
+			return;
+		}
 
-			if (Objects.equals(player, client.getLocalPlayer()))
-			{
-				return;
-			}
+		// Check combat level to avoid NPE. Not sure why this happens, maybe the Player isn't really a player?
+		// The player isn't null, but all the fields are
+		if (player.getCombatLevel() != 0 && isPlayerInWoodcuttingGuild(player))
+		{
+			return;
+		}
 
-			// Check combat level to avoid NPE. Not sure why this happens, maybe the Player isn't really a player?
-			// The player isn't null, but all the fields are
-			if (player.getCombatLevel() != 0 && isRegionInWoodcuttingGuild(player.getWorldLocation().getRegionID()))
-			{
-				return;
-			}
-
-			if (isWoodcutting(player) && !treeMap.isEmpty())
-			{
-				addToTreeFocusedMaps(player);
-			}
-			else if (player.getAnimation() == AnimationID.IDLE)
-			{
-				removeFromTreeMaps(player);
-			}
+		if (isWoodcutting(player))
+		{
+			addToTreeFocusedMaps(player);
+		}
+		else if (player.getAnimation() == AnimationID.IDLE)
+		{
+			removeFromTreeMaps(player);
 		}
 	}
 
 	@Subscribe
 	public void onPlayerOrientationChanged(final PlayerOrientationChanged event)
 	{
-		// Player orientation map should already consist of players chopping trees but check just in case
-		// Also, animation changed should? fire before game tick, therefore non-chopping players should be removed
-		// But again, just in case perform the necessary checks
-		if (firstRun)
-		{
-			return;
-		}
-
 		Player player = event.getPlayer();
 
 		log.debug("Player {} orientation changed from {} to {}", player.getName(), event.getPreviousOrientation(), event.getCurrentOrientation());
@@ -340,63 +269,71 @@ public class TreeCountPlugin extends Plugin
 			return;
 		}
 
-		if (isRegionInWoodcuttingGuild(player.getWorldLocation().getRegionID()))
+		if (isPlayerInWoodcuttingGuild(player))
 		{
 			return;
 		}
 
 		playerOrientationMap.put(player, event.getCurrentOrientation());
-		removeFromTreeMaps(player); // Remove the previous tracked case
 		if (isWoodcutting(player))
 		{
 			addToTreeFocusedMaps(player);
 		}
 	}
 
+	private static final Set<Integer> WOODCUTTING_ANIMATION_ID_SET = ImmutableSet.of(
+		AnimationID.WOODCUTTING_BRONZE,
+		AnimationID.WOODCUTTING_IRON,
+		AnimationID.WOODCUTTING_STEEL,
+		AnimationID.WOODCUTTING_BLACK,
+		AnimationID.WOODCUTTING_MITHRIL,
+		AnimationID.WOODCUTTING_ADAMANT,
+		AnimationID.WOODCUTTING_RUNE,
+		AnimationID.WOODCUTTING_GILDED,
+		AnimationID.WOODCUTTING_DRAGON,
+		AnimationID.WOODCUTTING_DRAGON_OR,
+		AnimationID.WOODCUTTING_INFERNAL,
+		AnimationID.WOODCUTTING_3A_AXE,
+		AnimationID.WOODCUTTING_CRYSTAL,
+		AnimationID.WOODCUTTING_TRAILBLAZER
+	);
+
 	private boolean isWoodcutting(Actor actor)
 	{
-		switch (actor.getAnimation())
-		{
-			case AnimationID.WOODCUTTING_BRONZE:
-			case AnimationID.WOODCUTTING_IRON:
-			case AnimationID.WOODCUTTING_STEEL:
-			case AnimationID.WOODCUTTING_BLACK:
-			case AnimationID.WOODCUTTING_MITHRIL:
-			case AnimationID.WOODCUTTING_ADAMANT:
-			case AnimationID.WOODCUTTING_RUNE:
-			case AnimationID.WOODCUTTING_GILDED:
-			case AnimationID.WOODCUTTING_DRAGON:
-			case AnimationID.WOODCUTTING_DRAGON_OR:
-			case AnimationID.WOODCUTTING_INFERNAL:
-			case AnimationID.WOODCUTTING_3A_AXE:
-			case AnimationID.WOODCUTTING_CRYSTAL:
-			case AnimationID.WOODCUTTING_TRAILBLAZER:
-				return true;
-			default:
-				return false;
-		}
+		return WOODCUTTING_ANIMATION_ID_SET.contains(actor.getAnimation());
 	}
 
 	void addToTreeFocusedMaps(Player player)
 	{
-		GameObject closestTree = findClosestFacingTree(player);
-		if (closestTree == null)
-		{
-			return;
-		}
-		playerMap.put(player, closestTree);
-		treeMap.merge(closestTree, 1, Integer::sum);
+		getFacingTree(player)
+			.ifPresent(facingTree ->
+				{
+					GameObject previousTreeInMap = playerTreeMap.put(player, facingTree);
+					if (previousTreeInMap != null)
+					{
+						treePlayerCountMap.computeIfPresent(previousTreeInMap, (unused, value) -> Math.max(0, value - 1));
+					}
+					treePlayerCountMap.merge(facingTree, 1, Integer::sum);
+				}
+			);
 	}
 
 	void removeFromTreeMaps(Player player)
 	{
-		GameObject tree = playerMap.get(player);
-		playerMap.remove(player);
-		treeMap.computeIfPresent(tree, (unused, value) -> Math.max(0, value - 1));
+		GameObject tree = playerTreeMap.remove(player);
+		if (tree != null)
+		{
+			treePlayerCountMap.computeIfPresent(tree, (unused, value) -> Math.max(0, value - 1));
+		}
 	}
 
-	GameObject findClosestFacingTree(Actor actor)
+	Optional<GameObject> getFacingTree(Actor actor)
 	{
+		if (tileTreeMap.isEmpty())
+		{
+			return Optional.empty();
+		}
+
 		WorldPoint actorLocation = actor.getWorldLocation();
 		Direction direction = new Angle(actor.getOrientation()).getNearestDirection();
 		WorldPoint facingPoint = neighborPoint(actorLocation, direction);
@@ -404,7 +341,7 @@ public class TreeCountPlugin extends Plugin
 		{
 			log.debug("Actor: {}, Direction: {}", actor.getName(), direction);
 		}
-		return tileTreeMap.get(facingPoint);
+		return Optional.ofNullable(tileTreeMap.get(facingPoint));
 	}
 
 	private WorldPoint neighborPoint(WorldPoint point, Direction direction)
@@ -438,6 +375,16 @@ public class TreeCountPlugin extends Plugin
 	{
 		Point point = pointFunction.apply(gameObject);
 		return WorldPoint.fromScene(client, point.getX(), point.getY(), gameObject.getPlane());
+	}
+
+	boolean isPlayerInWoodcuttingGuild(Player player)
+	{
+		return isRegionInWoodcuttingGuild(player.getWorldLocation().getRegionID());
+	}
+
+	boolean isGameObjectInWoodcuttingGuild(GameObject gameObject)
+	{
+		return isRegionInWoodcuttingGuild(gameObject.getWorldLocation().getRegionID());
 	}
 
 	boolean isRegionInWoodcuttingGuild(int regionID)

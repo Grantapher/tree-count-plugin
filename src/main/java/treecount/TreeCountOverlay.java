@@ -5,6 +5,7 @@ import java.awt.Dimension;
 import java.awt.Graphics2D;
 import java.awt.Polygon;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.WeakHashMap;
 import java.util.concurrent.ThreadLocalRandom;
@@ -40,47 +41,46 @@ public class TreeCountOverlay extends Overlay
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
-		if (plugin.isRegionInWoodcuttingGuild(client.getLocalPlayer().getWorldLocation().getRegionID()))
+		if (plugin.isPlayerInWoodcuttingGuild(client.getLocalPlayer()))
 		{
 			return null;
 		}
 
 		renderDebugOverlay(graphics);
 
-		plugin.getTreeMap().forEach((gameObject, choppers) ->
+		plugin.getTreePlayerCountMap().forEach((gameObject, choppers) ->
 		{
-			if (choppers <= 0 || Tree.findForestryTree(gameObject.getId()) == null)
+			if (choppers == null || choppers <= 0 || Tree.findForestryTree(gameObject.getId()) == null)
 			{
 				return;
 			}
 
-			String text = String.valueOf(choppers);
-			Point point = Perspective.getCanvasTextLocation(client, graphics, gameObject.getLocalLocation(), text, 0);
-			if (point == null)
-			{
-				return;
-			}
-			Color color;
-			if (choppers >= 10)
-			{
-				color = Color.GREEN;
-			}
-			else if (choppers >= 7)
-			{
-				color = Color.YELLOW;
-			}
-			else if (choppers >= 4)
-			{
-				color = Color.ORANGE;
-			}
-			else
-			{
-				color = Color.RED;
-			}
-			OverlayUtil.renderTextLocation(graphics, point, text, color);
+			final String text = String.valueOf(choppers);
+			Optional.ofNullable(Perspective.getCanvasTextLocation(client, graphics, gameObject.getLocalLocation(), text, 0))
+				.ifPresent(point -> OverlayUtil.renderTextLocation(graphics, point, text, getColorForChoppers(choppers)));
 		});
 
 		return null;
+	}
+
+	private static Color getColorForChoppers(int choppers)
+	{
+		if (choppers >= 10)
+		{
+			return Color.GREEN;
+		}
+		else if (choppers >= 7)
+		{
+			return Color.YELLOW;
+		}
+		else if (choppers >= 4)
+		{
+			return Color.ORANGE;
+		}
+		else
+		{
+			return Color.RED;
+		}
 	}
 
 	private static final Random random = ThreadLocalRandom.current();
@@ -103,14 +103,9 @@ public class TreeCountOverlay extends Overlay
 
 	private void renderFacingTree(Graphics2D graphics)
 	{
-		if (client.getLocalPlayer() != null)
-		{
-			GameObject tree = plugin.findClosestFacingTree(client.getLocalPlayer());
-			if (tree != null)
-			{
-				OverlayUtil.renderTileOverlay(graphics, tree, "", Color.GREEN);
-			}
-		}
+		Optional.ofNullable(client.getLocalPlayer())
+			.flatMap(plugin::getFacingTree)
+			.ifPresent(tree -> OverlayUtil.renderTileOverlay(graphics, tree, "", Color.GREEN));
 	}
 
 	private void renderTreeTiles(Graphics2D graphics)
@@ -120,17 +115,9 @@ public class TreeCountOverlay extends Overlay
 				final Color color = colorMap.computeIfAbsent(tree, (unused) -> Color.getHSBColor(random.nextFloat(), 1f, 1f));
 				tiles.forEach(worldPoint ->
 					{
-						LocalPoint localPoint = LocalPoint.fromWorld(client, worldPoint);
-						if (localPoint == null)
-						{
-							return;
-						}
-						Polygon poly = Perspective.getCanvasTilePoly(client, localPoint);
-						if (poly == null)
-						{
-							return;
-						}
-						OverlayUtil.renderPolygon(graphics, poly, color);
+						Optional.ofNullable(LocalPoint.fromWorld(client, worldPoint))
+							.map(localPoint -> Perspective.getCanvasTilePoly(client, localPoint))
+							.ifPresent(poly -> OverlayUtil.renderPolygon(graphics, poly, color));
 					}
 				);
 			}

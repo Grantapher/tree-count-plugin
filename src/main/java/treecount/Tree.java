@@ -26,6 +26,7 @@ package treecount;
 
 import com.google.common.collect.ImmutableMap;
 import java.util.Map;
+import java.util.Optional;
 import lombok.Getter;
 import net.runelite.api.ObjectID;
 import static net.runelite.api.ObjectID.*;
@@ -103,9 +104,9 @@ public enum Tree
 	 * @param objectId
 	 * @return tree that matches the given object ID, or null if no match
 	 */
-	static Tree findTree(int objectId)
+	static Optional<Tree> findTree(int objectId)
 	{
-		return ALL_TREES.get(objectId);
+		return Optional.ofNullable(ALL_TREES.get(objectId));
 	}
 
 	/**

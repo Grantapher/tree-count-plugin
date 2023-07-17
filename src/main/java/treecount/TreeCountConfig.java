@@ -16,6 +16,7 @@ public interface TreeCountConfig extends Config
 	{
 		return false;
 	}
+
 	@ConfigItem(
 		keyName = "renderFacingTree",
 		name = "(Debug) Show facing tree",
